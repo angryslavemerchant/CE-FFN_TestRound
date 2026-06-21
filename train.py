@@ -186,9 +186,8 @@ def train(cfg: Config):
                 # recent training batch. Both should deviate from uniform (1/N)
                 # if the binding mechanism is doing real work.
                 if cfg.block_type == "composing_experts":
-                    m = model.module if isinstance(model, nn.DataParallel) else model
                     log = {}
-                    for i, layer in enumerate(m.layers):
+                    for i, layer in enumerate(model.layers):
                         b  = layer.block
                         N  = b.n_experts
                         if b.last_routing_weights is not None:
