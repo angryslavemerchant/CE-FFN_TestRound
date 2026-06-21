@@ -166,15 +166,15 @@ def train(cfg: Config):
             optimizer.step()
             scheduler.step()
             step += 1
-            loss_accum += loss.item()
+            loss_accum = loss_accum + loss.detach()  # stays on GPU, no sync per step
             pbar.update(1)
 
             if step % cfg.log_every == 0:
-                avg_loss = loss_accum / cfg.log_every
+                avg_loss = loss_accum.item() / cfg.log_every  # one sync per log interval
                 lr_now   = scheduler.get_last_lr()[0]
                 wandb.log({"train/loss": avg_loss, "train/lr": lr_now}, step=step)
                 pbar.set_postfix(loss=f"{avg_loss:.4f}", lr=f"{lr_now:.2e}")
-                loss_accum = 0.0
+                loss_accum = 0.0  # back to float after the sync
 
             if step % cfg.eval_every == 0:
                 scores = {

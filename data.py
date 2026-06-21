@@ -5,6 +5,10 @@ Each example is packed as a single decoder-only sequence:
     [BOS] src_token... [SEP] tgt_token... [EOS]
 
 Loss is masked to only the answer span (SEP+1 through EOS inclusive).
+
+All tensors are pre-computed at dataset construction time so __getitem__
+is a pure list lookup — no string processing or tensor allocation on the
+hot path.
 """
 
 import os
@@ -25,11 +29,9 @@ class Vocabulary:
 
     def build(self, token_lists: List[List[str]]) -> "Vocabulary":
         """Build from a list of token sequences (src and tgt together)."""
-        # Special tokens first — indices are stable
         for tok in SPECIAL_TOKENS:
             self.token2id[tok] = len(self.id2token)
             self.id2token.append(tok)
-        # All other tokens, sorted for reproducibility
         all_tokens = set()
         for toks in token_lists:
             all_tokens.update(toks)
@@ -67,7 +69,7 @@ class Vocabulary:
 def build_vocab(data_dir: str) -> Vocabulary:
     """
     Build a shared vocabulary from the pcfgset (random) training set.
-    We always use the random split to define vocab so it's the same across all experiments.
+    Always use the random split so vocab is identical across all experiments.
     """
     src_path = os.path.join(data_dir, "pcfgset", "train.src")
     tgt_path = os.path.join(data_dir, "pcfgset", "train.tgt")
@@ -87,7 +89,6 @@ def load_pairs(
     """
     Load (src, tgt) string-token pairs from two parallel files.
     Drops examples where BOS+src+SEP+tgt+EOS > max_total_len.
-    Returns: (srcs, tgts) as parallel lists.
     """
     srcs, tgts = [], []
     dropped = 0
@@ -95,7 +96,6 @@ def load_pairs(
         for src_line, tgt_line in zip(sf, tf):
             src = src_line.strip().split()
             tgt = tgt_line.strip().split()
-            # full sequence length: 1(BOS) + len(src) + 1(SEP) + len(tgt) + 1(EOS)
             if 1 + len(src) + 1 + len(tgt) + 1 <= max_total_len:
                 srcs.append(src)
                 tgts.append(tgt)
@@ -111,11 +111,10 @@ class PCFGDataset(Dataset):
     Packs each (src, tgt) pair into a single sequence:
         [BOS] src... [SEP] tgt... [EOS]
 
-    Returns:
-        input_ids  : LongTensor  — the full packed sequence
-        loss_mask  : FloatTensor — 1.0 at positions to predict (tgt tokens + EOS), 0.0 elsewhere
-        src_tokens : List[str]   — raw src strings (for greedy eval)
-        tgt_tokens : List[str]   — raw tgt strings (for greedy eval)
+    All input_ids and loss_mask tensors are pre-computed at init time.
+    __getitem__ is a pure list lookup — zero allocation on the hot path.
+
+    Memory cost: ~30MB for 82K examples (trivial).
     """
 
     def __init__(
@@ -125,37 +124,30 @@ class PCFGDataset(Dataset):
         vocab: Vocabulary,
     ):
         assert len(srcs) == len(tgts)
-        self.srcs = srcs
-        self.tgts = tgts
+        self.srcs = srcs   # kept for greedy eval
+        self.tgts = tgts   # kept for greedy eval
         self.vocab = vocab
 
+        # Pre-compute all tensors once
+        self._ids:   List[torch.Tensor] = []
+        self._masks: List[torch.Tensor] = []
+
+        for src, tgt in zip(srcs, tgts):
+            ids = [vocab.bos_idx] + vocab.encode(src) + [vocab.sep_idx] + vocab.encode(tgt) + [vocab.eos_idx]
+
+            loss_mask = [0.0] * len(ids)
+            answer_start = 1 + len(src) + 1
+            for i in range(answer_start, len(ids)):
+                loss_mask[i] = 1.0
+
+            self._ids.append(torch.tensor(ids,       dtype=torch.long))
+            self._masks.append(torch.tensor(loss_mask, dtype=torch.float))
+
     def __len__(self) -> int:
-        return len(self.srcs)
+        return len(self._ids)
 
     def __getitem__(self, idx):
-        src, tgt = self.srcs[idx], self.tgts[idx]
-        v = self.vocab
-
-        # Packed sequence
-        ids = [v.bos_idx] + v.encode(src) + [v.sep_idx] + v.encode(tgt) + [v.eos_idx]
-
-        # Loss mask: 1 at every position the model should predict
-        # In next-token prediction, position i produces a logit that predicts ids[i+1].
-        # We want to predict tgt[0], tgt[1], ..., tgt[-1], EOS.
-        # Those sit at positions 1+len(src)+1 through 1+len(src)+1+len(tgt) in ids.
-        # The loss_mask marks these positions so that when we shift by 1 (logits[i] → ids[i+1]),
-        # shift_mask = loss_mask[1:] correctly selects the right logit-target pairs.
-        loss_mask = [0.0] * len(ids)
-        answer_start = 1 + len(src) + 1   # first tgt token index
-        for i in range(answer_start, len(ids)):
-            loss_mask[i] = 1.0
-
-        return (
-            torch.tensor(ids, dtype=torch.long),
-            torch.tensor(loss_mask, dtype=torch.float),
-            src,
-            tgt,
-        )
+        return self._ids[idx], self._masks[idx], self.srcs[idx], self.tgts[idx]
 
 
 def collate(batch, pad_idx: int):
@@ -170,14 +162,15 @@ def make_loader(
     dataset: PCFGDataset,
     batch_size: int,
     shuffle: bool,
-    num_workers: int = 2,
+    num_workers: int = 4,
 ) -> DataLoader:
     pad_idx = dataset.vocab.pad_idx
     return DataLoader(
         dataset,
         batch_size=batch_size,
         shuffle=shuffle,
-        num_workers=0,   # 0 = main process; avoids worker overhead for small data
+        num_workers=num_workers,
         collate_fn=lambda b: collate(b, pad_idx),
-        pin_memory=False,
+        pin_memory=True,
+        persistent_workers=(num_workers > 0),
     )
