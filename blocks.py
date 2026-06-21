@@ -77,9 +77,10 @@ class ComposingExpertsBlock(nn.Module):
       Both updated every forward pass. Check that neither collapses to uniform.
     """
 
-    def __init__(self, d_model: int, ffn_dim: int, dropout: float = 0.1, n_experts: int = 4):
+    def __init__(self, d_model: int, ffn_dim: int, dropout: float = 0.1, n_experts: int = 4, comp_dim: int = 64):
         super().__init__()
         self.n_experts = n_experts
+        self.comp_dim  = comp_dim
         expert_ffn     = ffn_dim // n_experts
 
         # ── 1. Addresses ──────────────────────────────────────────────────────
@@ -87,10 +88,9 @@ class ComposingExpertsBlock(nn.Module):
         nn.init.normal_(self.addresses, std=0.02)
 
         # ── 2. Routing attention (pre-MLP) ────────────────────────────────────
-        # Q and K only — no V, no output projection, no softmax.
-        # Raw scores are saved and used in the pooling step.
-        self.route_q = nn.Linear(d_model, d_model, bias=False)
-        self.route_k = nn.Linear(d_model, d_model, bias=False)
+        # Projects to comp_dim — only needs to produce N×N scores, not d_model.
+        self.route_q = nn.Linear(d_model, comp_dim, bias=False)
+        self.route_k = nn.Linear(d_model, comp_dim, bias=False)
 
         # ── 3. Expert MLPs ────────────────────────────────────────────────────
         self.experts = nn.ModuleList([
@@ -104,11 +104,12 @@ class ComposingExpertsBlock(nn.Module):
         ])
 
         # ── 4. Composition attention (post-MLP) ───────────────────────────────
+        # Q/K/V all project to comp_dim; out maps comp_dim back to d_model.
         self.comp_norm = nn.LayerNorm(d_model)
-        self.comp_q    = nn.Linear(d_model, d_model, bias=False)
-        self.comp_k    = nn.Linear(d_model, d_model, bias=False)
-        self.comp_v    = nn.Linear(d_model, d_model, bias=False)
-        self.comp_out  = nn.Linear(d_model, d_model, bias=False)
+        self.comp_q    = nn.Linear(d_model, comp_dim, bias=False)
+        self.comp_k    = nn.Linear(d_model, comp_dim, bias=False)
+        self.comp_v    = nn.Linear(d_model, comp_dim, bias=False)
+        self.comp_out  = nn.Linear(comp_dim, d_model, bias=False)
         self.dropout   = nn.Dropout(dropout)
 
         # ── Instrumentation ───────────────────────────────────────────────────
@@ -126,9 +127,9 @@ class ComposingExpertsBlock(nn.Module):
         # Stack modulated inputs → (B*T, N, D) for the routing QK computation.
         X_mod = torch.stack(modulated, dim=2).view(B * T, N, D)
 
-        Q_r = self.route_q(X_mod)                                          # (B*T, N, D)
-        K_r = self.route_k(X_mod)                                          # (B*T, N, D)
-        routing_scores = torch.bmm(Q_r, K_r.transpose(1, 2)) * (D ** -0.5)  # (B*T, N, N)
+        Q_r = self.route_q(X_mod)                                                    # (B*T, N, comp_dim)
+        K_r = self.route_k(X_mod)                                                    # (B*T, N, comp_dim)
+        routing_scores = torch.bmm(Q_r, K_r.transpose(1, 2)) * (self.comp_dim ** -0.5)  # (B*T, N, N)
         # No softmax — raw scores are saved and cashed in at pooling.
 
         # ── 3. Expert MLPs ────────────────────────────────────────────────────
@@ -138,10 +139,10 @@ class ComposingExpertsBlock(nn.Module):
         O = torch.stack(expert_outs, dim=2).view(B * T, N, D)  # (B*T, N, D)
 
         normed  = self.comp_norm(O)
-        Q       = self.comp_q(normed)
+        Q       = self.comp_q(normed)                                          # (B*T, N, comp_dim)
         K       = self.comp_k(normed)
         V       = self.comp_v(normed)
-        scores  = torch.bmm(Q, K.transpose(1, 2)) * (D ** -0.5)
+        scores  = torch.bmm(Q, K.transpose(1, 2)) * (self.comp_dim ** -0.5)   # (B*T, N, N)
         weights = scores.softmax(dim=-1)
 
         self.last_attn_weights = weights.detach().mean(dim=0)  # (N, N)

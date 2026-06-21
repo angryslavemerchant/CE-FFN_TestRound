@@ -119,7 +119,7 @@ def main(d_model, ffn_dim, n_experts, n_layers, seq_len):
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
-    p.add_argument("--d_model",   type=int, default=128)
+    p.add_argument("--d_model",   type=int, default=64)
     p.add_argument("--ffn_dim",   type=int, default=512,
                    help="ffn_dim used for the experts block")
     p.add_argument("--n_experts", type=int, default=8)

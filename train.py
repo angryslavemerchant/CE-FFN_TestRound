@@ -55,6 +55,7 @@ class Config:
     max_seq_len: int       = 128
     block_type:  str       = "plain_mlp"
     n_experts:      int    = 4
+    comp_dim:       int    = 64    # internal projection dim for routing and composition attention
     d_model:        int    = 128
     nhead:          int    = 4
     n_layers:       int    = 4
@@ -143,7 +144,7 @@ def train(cfg: Config):
         d_model=cfg.d_model, nhead=cfg.nhead, n_layers=cfg.n_layers,
         ffn_dim=ffn_dim, max_seq_len=cfg.max_seq_len,
         dropout=cfg.dropout, block_type=cfg.block_type,
-        block_kwargs={"n_experts": cfg.n_experts},
+        block_kwargs={"n_experts": cfg.n_experts, "comp_dim": cfg.comp_dim},
     ).to(device)
 
     print(f"{run_name}  |  params: {count_params(model):,}  |  device: {device}")
@@ -236,6 +237,8 @@ def parse_args() -> Config:
     p.add_argument("--block",       default="plain_mlp",
                    choices=["plain_mlp", "composing_experts", "averaging_experts"], dest="block_type")
     p.add_argument("--n_experts",       type=int,   default=4)
+    p.add_argument("--comp_dim",        type=int,   default=64,
+                   help="internal projection dim for routing and composition attention (< d_model)")
     p.add_argument("--d_model",         type=int,   default=128)
     p.add_argument("--nhead",           type=int,   default=4)
     p.add_argument("--n_layers",        type=int,   default=4)
