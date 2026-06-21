@@ -117,7 +117,7 @@ def train(cfg: Config):
     loop_tag = "_looped" if cfg.looped else ""
     run_name = f"{cfg.block_type}{loop_tag}_dm{cfg.d_model}_L{cfg.n_layers}_seed{cfg.seed}"
 
-    wandb.init(project="composing-experts", name=run_name, config=cfg.__dict__)
+    wandb.init(project="composing-experts-looped", name=run_name, config=cfg.__dict__)
 
     vocab = build_vocab(cfg.data_dir)
 
