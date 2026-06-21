@@ -54,10 +54,12 @@ class Config:
     eval_splits: List[str] = field(default_factory=lambda: ["pcfgset"])
     max_seq_len: int       = 128
     block_type:  str       = "plain_mlp"
-    d_model:     int       = 128
-    nhead:       int       = 4
-    n_layers:    int       = 4
-    ffn_dim:     int       = 512
+    n_experts:      int    = 4
+    d_model:        int    = 128
+    nhead:          int    = 4
+    n_layers:       int    = 4
+    ffn_dim_plain:  int    = 512   # FFN hidden dim for plain_mlp
+    ffn_dim_experts: int   = 512   # FFN hidden dim for composing/averaging experts
     dropout:     float     = 0.1
     batch_size:  int       = 256
     lr:          float     = 3e-4
@@ -134,11 +136,14 @@ def train(cfg: Config):
         srcs, tgts = load_pairs(src_p, tgt_p, cfg.max_seq_len)
         eval_datasets[split] = PCFGDataset(srcs, tgts, vocab)
 
+    ffn_dim = cfg.ffn_dim_plain if cfg.block_type == "plain_mlp" else cfg.ffn_dim_experts
+
     model = make_model(
         vocab_size=len(vocab), pad_idx=vocab.pad_idx,
         d_model=cfg.d_model, nhead=cfg.nhead, n_layers=cfg.n_layers,
-        ffn_dim=cfg.ffn_dim, max_seq_len=cfg.max_seq_len,
+        ffn_dim=ffn_dim, max_seq_len=cfg.max_seq_len,
         dropout=cfg.dropout, block_type=cfg.block_type,
+        block_kwargs={"n_experts": cfg.n_experts},
     ).to(device)
 
     print(f"{run_name}  |  params: {count_params(model):,}  |  device: {device}")
@@ -176,6 +181,27 @@ def train(cfg: Config):
                 pbar.set_postfix(loss=f"{avg_loss:.4f}", lr=f"{lr_now:.2e}")
                 loss_accum = 0.0  # back to float after the sync
 
+                # ── Instrumentation (composing_experts only) ──────────────────
+                # Log routing and composition attention weight stats from the most
+                # recent training batch. Both should deviate from uniform (1/N)
+                # if the binding mechanism is doing real work.
+                if cfg.block_type == "composing_experts":
+                    m = model.module if isinstance(model, nn.DataParallel) else model
+                    log = {}
+                    for i, layer in enumerate(m.layers):
+                        b  = layer.block
+                        N  = b.n_experts
+                        if b.last_routing_weights is not None:
+                            rw = b.last_routing_weights.cpu()
+                            log[f"routing/L{i}/deviation_from_uniform"] = (rw - 1/N).abs().mean().item()
+                            log[f"routing/L{i}/max_weight"]             = rw.max().item()
+                            log[f"routing/L{i}/min_weight"]             = rw.min().item()
+                        if b.last_attn_weights is not None:
+                            aw = b.last_attn_weights.cpu()
+                            log[f"comp_attn/L{i}/deviation_from_uniform"] = (aw - 1/N).abs().mean().item()
+                    if log:
+                        wandb.log(log, step=step)
+
             if step % cfg.eval_every == 0:
                 scores = {
                     split: evaluate(model, ds, vocab, device, cfg.eval_batch, cfg.max_eval_batches)
@@ -210,10 +236,14 @@ def parse_args() -> Config:
     p.add_argument("--eval_splits", nargs="+", default=["pcfgset"])
     p.add_argument("--block",       default="plain_mlp",
                    choices=["plain_mlp", "composing_experts", "averaging_experts"], dest="block_type")
-    p.add_argument("--d_model",      type=int,   default=128)
-    p.add_argument("--nhead",        type=int,   default=4)
-    p.add_argument("--n_layers",     type=int,   default=4)
-    p.add_argument("--ffn_dim",      type=int,   default=512)
+    p.add_argument("--n_experts",       type=int,   default=4)
+    p.add_argument("--d_model",         type=int,   default=128)
+    p.add_argument("--nhead",           type=int,   default=4)
+    p.add_argument("--n_layers",        type=int,   default=4)
+    p.add_argument("--ffn_dim_plain",   type=int,   default=512,
+                   help="FFN hidden dim for plain_mlp (scale up to match CE FLOPs)")
+    p.add_argument("--ffn_dim_experts", type=int,   default=512,
+                   help="FFN hidden dim for composing/averaging experts")
     p.add_argument("--dropout",      type=float, default=0.1)
     p.add_argument("--batch_size",   type=int,   default=256)
     p.add_argument("--lr",           type=float, default=3e-4)
