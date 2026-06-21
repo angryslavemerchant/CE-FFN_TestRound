@@ -151,6 +151,8 @@ def train(cfg: Config):
         looped=cfg.looped,
     ).to(device)
 
+    model = torch.compile(model)
+
     print(f"{run_name}  |  params: {count_params(model):,}  |  device: {device}")
 
     optimizer = AdamW(model.parameters(), lr=cfg.lr,
