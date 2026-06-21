@@ -102,6 +102,7 @@ class DecoderOnlyTransformer(nn.Module):
         super().__init__()
         self.d_model   = d_model
         self.pad_idx   = pad_idx
+        self.max_seq_len = max_seq_len
 
         block_kwargs = block_kwargs or {}
 
@@ -157,7 +158,7 @@ class DecoderOnlyTransformer(nn.Module):
             key_padding_mask = (input_ids == self.pad_idx)
 
         # Embeddings
-        positions = torch.arange(T, device=device).unsqueeze(0)  # (1, T)
+        positions = torch.arange(T, device=device).unsqueeze(0).clamp(max=self.max_seq_len - 1)
         x = self.drop_in(
             self.token_embedding(input_ids) + self.pos_embedding(positions)
         )
@@ -196,7 +197,7 @@ class DecoderOnlyTransformer(nn.Module):
         bos_idx: int,
         sep_idx: int,
         eos_idx: int,
-        max_gen_len: int = 100,
+        max_gen_len: int = 50,
     ) -> list:
         """
         Batched greedy decoding.
