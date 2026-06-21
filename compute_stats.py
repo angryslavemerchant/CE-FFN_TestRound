@@ -6,6 +6,7 @@ Usage
 python compute_stats.py                                     # defaults
 python compute_stats.py --d_model 256 --n_experts 4
 python compute_stats.py --d_model 128 --n_experts 8
+python compute_stats.py --d_model 128 --comp_dim 64        # explicit comp_dim
 """
 
 import argparse
@@ -37,17 +38,24 @@ def fmt_f(n):
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
-def main(d_model, ffn_dim, n_experts, n_layers, seq_len):
+def main(d_model, ffn_dim, n_experts, n_layers, seq_len, comp_dim):
     B, T = 1, seq_len
     x = torch.randn(B, T, d_model)
 
+    # Warn if comp_dim >= d_model — at that point it's an expansion, not a bottleneck.
+    if comp_dim >= d_model:
+        print(f"\n  WARNING: comp_dim={comp_dim} >= d_model={d_model}. "
+              f"Routing/composition projections will expand rather than compress. "
+              f"Consider --comp_dim {d_model // 2} for a true bottleneck.\n")
+
     print(f"\n{'─'*62}")
-    print(f"  d_model={d_model}  ffn_dim_experts={ffn_dim}  n_experts={n_experts}  n_layers={n_layers}")
+    print(f"  d_model={d_model}  ffn_dim_experts={ffn_dim}  n_experts={n_experts}  "
+          f"n_layers={n_layers}  comp_dim={comp_dim}")
     print(f"{'─'*62}\n")
 
     # ── Block-level stats ─────────────────────────────────────────────────────
     plain   = PlainMLP(d_model, ffn_dim)
-    experts = ComposingExpertsBlock(d_model, ffn_dim, n_experts=n_experts)
+    experts = ComposingExpertsBlock(d_model, ffn_dim, n_experts=n_experts, comp_dim=comp_dim)
 
     plain_p   = count_params(plain)
     experts_p = count_params(experts)
@@ -65,23 +73,23 @@ def main(d_model, ffn_dim, n_experts, n_layers, seq_len):
     # ── ComposingExperts param breakdown ──────────────────────────────────────
     print(f"\n  ComposingExperts breakdown:")
     for name, child in experts.named_children():
-        p = sum(x.numel() for x in child.parameters())
-        if p > 0:
-            print(f"    {name:<18}  {fmt_p(p):>8}  ({p/experts_p*100:.0f}%)")
-    direct = sum(p.numel() for n, p in experts.named_parameters() if "." not in n)
+        n_params = sum(param.numel() for param in child.parameters())
+        if n_params > 0:
+            print(f"    {name:<18}  {fmt_p(n_params):>8}  ({n_params/experts_p*100:.0f}%)")
+    direct = sum(param.numel() for name, param in experts.named_parameters() if "." not in name)
     if direct:
         print(f"    {'addresses':<18}  {fmt_p(direct):>8}  ({direct/experts_p*100:.0f}%)")
 
     # ── Matched plain ffn_dim ─────────────────────────────────────────────────
     # PlainMLP FLOPs/token = 4 × d_model × ffn_dim_plain
     # Solve for ffn_dim_plain such that FLOPs match CE:
-    # PlainMLP FLOPs/token = 4 × d_model × ffn_dim_plain  →  ffn_dim_plain = FLOPs / (4 × d_model)
+    # ffn_dim_plain = FLOPs / (4 × d_model)
     matched_ffn_raw = experts_fpt // (4 * d_model)
     matched_ffn     = (matched_ffn_raw // 4) * 4   # round down to nearest multiple of 4
-    matched_plain = PlainMLP(d_model, matched_ffn)
-    matched_f     = measure_flops(matched_plain, x)
-    matched_fpt   = matched_f // T
-    matched_p     = count_params(matched_plain)
+    matched_plain   = PlainMLP(d_model, matched_ffn)
+    matched_f       = measure_flops(matched_plain, x)
+    matched_fpt     = matched_f // T
+    matched_p       = count_params(matched_plain)
 
     print(f"\n{'─'*62}")
     print(f"  MATCHED PLAIN BASELINE\n")
@@ -96,9 +104,9 @@ def main(d_model, ffn_dim, n_experts, n_layers, seq_len):
 
     ids = torch.randint(1, 535, (B, T))
     configs = [
-        ("plain_mlp",         ffn_dim,      {},                       f"PlainMLP  ffn={ffn_dim}"),
-        ("plain_mlp",         matched_ffn,  {},                       f"PlainMLP  ffn={matched_ffn}  (matched)"),
-        ("composing_experts", ffn_dim,      {"n_experts": n_experts}, f"ComposingExperts  N={n_experts}  ffn={ffn_dim}"),
+        ("plain_mlp",         ffn_dim,      {},                                          f"PlainMLP  ffn={ffn_dim}"),
+        ("plain_mlp",         matched_ffn,  {},                                          f"PlainMLP  ffn={matched_ffn}  (matched)"),
+        ("composing_experts", ffn_dim,      {"n_experts": n_experts, "comp_dim": comp_dim}, f"ComposingExperts  N={n_experts}  ffn={ffn_dim}"),
     ]
     nheads = max(1, d_model // 32)
 
@@ -113,17 +121,24 @@ def main(d_model, ffn_dim, n_experts, n_layers, seq_len):
         print(f"  {label:<42}  {fmt_p(p):>10}  {fmt_f(f//T):>14}")
 
     print(f"\n  Run commands:")
-    print(f"    python train.py --block composing_experts --n_experts {n_experts} --ffn_dim_experts {ffn_dim}")
+    print(f"    python train.py --block composing_experts --n_experts {n_experts} --ffn_dim_experts {ffn_dim} --comp_dim {comp_dim}")
     print(f"    python train.py --block plain_mlp --ffn_dim_plain {matched_ffn}    # compute-matched")
     print(f"    python train.py --block plain_mlp --ffn_dim_plain {ffn_dim}        # param-matched (smaller)\n")
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
-    p.add_argument("--d_model",   type=int, default=64)
+    p.add_argument("--d_model",   type=int, default=128)
     p.add_argument("--ffn_dim",   type=int, default=512,
                    help="ffn_dim used for the experts block")
     p.add_argument("--n_experts", type=int, default=8)
     p.add_argument("--n_layers",  type=int, default=4)
     p.add_argument("--seq_len",   type=int, default=32)
+    p.add_argument("--comp_dim",  type=int, default=32,
+                   help="projection dim for routing and composition attention "
+                        "(default: d_model // 2, so it acts as a bottleneck)")
     a = p.parse_args()
-    main(a.d_model, a.ffn_dim, a.n_experts, a.n_layers, a.seq_len)
+
+    # Default comp_dim to d_model // 2 so it's always a bottleneck regardless of d_model.
+    comp_dim = a.comp_dim if a.comp_dim is not None else max(8, a.d_model // 2)
+
+    main(a.d_model, a.ffn_dim, a.n_experts, a.n_layers, a.seq_len, comp_dim)

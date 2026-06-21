@@ -92,16 +92,20 @@ class ComposingExpertsBlock(nn.Module):
         self.route_q = nn.Linear(d_model, comp_dim, bias=False)
         self.route_k = nn.Linear(d_model, comp_dim, bias=False)
 
-        # ── 3. Expert MLPs ────────────────────────────────────────────────────
-        self.experts = nn.ModuleList([
-            nn.Sequential(
-                nn.Linear(d_model, expert_ffn),
-                nn.GELU(),
-                nn.Dropout(dropout),
-                nn.Linear(expert_ffn, d_model),
-            )
-            for _ in range(n_experts)
-        ])
+        # ── 3. Expert MLPs — stacked weights for parallel execution ─────────────
+        # Instead of N separate nn.Linear modules (sequential kernel launches),
+        # store weights as (N, in, out) tensors and use einsum — one GPU op.
+        self.expert_ffn = expert_ffn
+        self.W1 = nn.Parameter(torch.empty(n_experts, d_model,    expert_ffn))
+        self.b1 = nn.Parameter(torch.zeros(n_experts, expert_ffn))
+        self.W2 = nn.Parameter(torch.empty(n_experts, expert_ffn, d_model))
+        self.b2 = nn.Parameter(torch.zeros(n_experts, d_model))
+
+        for i in range(n_experts):
+            nn.init.kaiming_uniform_(self.W1[i], a=math.sqrt(5))
+            nn.init.kaiming_uniform_(self.W2[i], a=math.sqrt(5))
+        nn.init.uniform_(self.b1, -1.0 / math.sqrt(d_model),    1.0 / math.sqrt(d_model))
+        nn.init.uniform_(self.b2, -1.0 / math.sqrt(expert_ffn), 1.0 / math.sqrt(expert_ffn))
 
         # ── 4. Composition attention (post-MLP) ───────────────────────────────
         # Q/K/V all project to comp_dim; out maps comp_dim back to d_model.
@@ -120,25 +124,24 @@ class ComposingExpertsBlock(nn.Module):
         B, T, D = x.shape
         N = self.n_experts
 
-        # ── 1. Modulate ───────────────────────────────────────────────────────
-        modulated = [x + self.addresses[i] for i in range(N)]  # N × (B, T, D)
+        # ── 1. Modulate — broadcast addresses over (B, T) ────────────────────
+        X_mod = x.unsqueeze(2) + self.addresses  # (B, T, N, D)
 
         # ── 2. Routing attention ──────────────────────────────────────────────
-        # Stack modulated inputs → (B*T, N, D) for the routing QK computation.
-        X_mod = torch.stack(modulated, dim=2).view(B * T, N, D)
-
-        Q_r = self.route_q(X_mod)                                                    # (B*T, N, comp_dim)
-        K_r = self.route_k(X_mod)                                                    # (B*T, N, comp_dim)
+        X_flat = X_mod.view(B * T, N, D)                                              # (B*T, N, D)
+        Q_r = self.route_q(X_flat)                                                    # (B*T, N, comp_dim)
+        K_r = self.route_k(X_flat)                                                    # (B*T, N, comp_dim)
         routing_scores = torch.bmm(Q_r, K_r.transpose(1, 2)) * (self.comp_dim ** -0.5)  # (B*T, N, N)
-        # No softmax — raw scores are saved and cashed in at pooling.
 
-        # ── 3. Expert MLPs ────────────────────────────────────────────────────
-        expert_outs = [self.experts[i](modulated[i]) for i in range(N)]  # N × (B, T, D)
+        # ── 3. Expert MLPs — all N in parallel ───────────────────────────────
+        h = torch.einsum('btnd,nde->btne', X_mod, self.W1) + self.b1  # (B, T, N, expert_ffn)
+        h = self.dropout(F.gelu(h))
+        O = torch.einsum('btne,ned->btnd', h, self.W2) + self.b2      # (B, T, N, D)
 
         # ── 4. Composition attention ──────────────────────────────────────────
-        O = torch.stack(expert_outs, dim=2).view(B * T, N, D)  # (B*T, N, D)
+        O_flat  = O.view(B * T, N, D)
 
-        normed  = self.comp_norm(O)
+        normed  = self.comp_norm(O_flat)
         Q       = self.comp_q(normed)                                          # (B*T, N, comp_dim)
         K       = self.comp_k(normed)
         V       = self.comp_v(normed)
@@ -148,17 +151,15 @@ class ComposingExpertsBlock(nn.Module):
         self.last_attn_weights = weights.detach().mean(dim=0)  # (N, N)
 
         composed = self.comp_out(torch.bmm(weights, V))
-        O = O + self.dropout(composed)                         # (B*T, N, D)
+        O_flat = O_flat + self.dropout(composed)               # (B*T, N, D)
 
         # ── 5. Weighted pool ──────────────────────────────────────────────────
-        # Column-sum: for each expert j, total attention pointed *at* j by all others.
-        # High value = many experts found j's address-modulated input relevant.
-        col_sums        = routing_scores.sum(dim=1)          # (B*T, N)
-        routing_weights = col_sums.softmax(dim=-1)           # (B*T, N)
+        col_sums        = routing_scores.sum(dim=1)            # (B*T, N)
+        routing_weights = col_sums.softmax(dim=-1)             # (B*T, N)
 
         self.last_routing_weights = routing_weights.detach().mean(dim=0)  # (N,)
 
-        out = torch.einsum('bn,bnd->bd', routing_weights, O)  # (B*T, D)
+        out = torch.einsum('bn,bnd->bd', routing_weights, O_flat)  # (B*T, D)
         return out.view(B, T, D)
 
 
