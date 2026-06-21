@@ -204,9 +204,9 @@ def parse_args() -> Config:
     p.add_argument("--eval_batch",   type=int,   default=128)
     p.add_argument("--max_eval_batches", type=int, default=50)
     a = p.parse_args()
-    return Config(**{k: v for k, v in vars(a).items()
-                     if k in Config.__dataclass_fields__},
-                  max_eval_batches=a.max_eval_batches if a.max_eval_batches > 0 else None)
+    kwargs = {k: v for k, v in vars(a).items() if k in Config.__dataclass_fields__}
+    kwargs["max_eval_batches"] = a.max_eval_batches if a.max_eval_batches > 0 else None
+    return Config(**kwargs)
 
 
 if __name__ == "__main__":
