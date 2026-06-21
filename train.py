@@ -147,6 +147,8 @@ def train(cfg: Config):
         block_kwargs={"n_experts": cfg.n_experts, "comp_dim": cfg.comp_dim},
     ).to(device)
 
+    model = torch.compile(model) #should make it faster
+
     print(f"{run_name}  |  params: {count_params(model):,}  |  device: {device}")
 
     optimizer = AdamW(model.parameters(), lr=cfg.lr,
