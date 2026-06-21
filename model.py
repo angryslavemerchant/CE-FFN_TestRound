@@ -234,6 +234,16 @@ class DecoderOnlyTransformer(nn.Module):
         for _ in range(max_gen_len):
             # Pad all generated sequences to the same length (right-pad)
             max_len = max(len(g) for g in generated)
+
+            # Hard cap: if any sequence would exceed the positional embedding
+            # table, mark it done before the forward pass blows up.
+            for j in range(B):
+                if not done[j] and len(generated[j]) >= self.pos_embedding.num_embeddings:
+                    done[j] = True
+
+            if all(done):
+                break
+
             input_ids = torch.full((B, max_len), self.pad_idx, dtype=torch.long, device=device)
             for j, g in enumerate(generated):
                 input_ids[j, :len(g)] = torch.tensor(g, dtype=torch.long, device=device)
