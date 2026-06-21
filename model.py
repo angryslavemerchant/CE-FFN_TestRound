@@ -27,9 +27,17 @@ class TransformerLayer(nn.Module):
     """
     One transformer layer with pre-norm (more stable for small models).
 
-    Residual structure:
+    Default order (block_first=False):   attn → block
         x = x + Dropout(MHA(LayerNorm(x)))
         x = x + Dropout(block(LayerNorm(x)))
+
+    Reversed order (block_first=True):   block → attn
+        x = x + Dropout(block(LayerNorm(x)))
+        x = x + Dropout(MHA(LayerNorm(x)))
+
+    The reversed order has CE compose within each position first, then
+    attention routes the already-composed representations across positions.
+    Particularly relevant for the looped variant.
     """
 
     def __init__(
@@ -38,15 +46,17 @@ class TransformerLayer(nn.Module):
         nhead: int,
         block: nn.Module,
         dropout: float = 0.1,
+        block_first: bool = False,
     ):
         super().__init__()
-        self.self_attn = nn.MultiheadAttention(
+        self.self_attn   = nn.MultiheadAttention(
             d_model, nhead, dropout=dropout, batch_first=True
         )
-        self.block   = block
-        self.norm1   = nn.LayerNorm(d_model)
-        self.norm2   = nn.LayerNorm(d_model)
-        self.dropout = nn.Dropout(dropout)
+        self.block       = block
+        self.norm1       = nn.LayerNorm(d_model)
+        self.norm2       = nn.LayerNorm(d_model)
+        self.dropout     = nn.Dropout(dropout)
+        self.block_first = block_first
 
     def forward(
         self,
@@ -54,18 +64,28 @@ class TransformerLayer(nn.Module):
         attn_mask: Optional[torch.Tensor] = None,
         key_padding_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        # ── Token-mixing attention ──────────────────────────────────────────
-        normed = self.norm1(x)
-        attn_out, _ = self.self_attn(
-            normed, normed, normed,
-            attn_mask=attn_mask,
-            key_padding_mask=key_padding_mask,
-            need_weights=False,
-        )
-        x = x + self.dropout(attn_out)
-
-        # ── FFN block (the swappable slot) ──────────────────────────────────
-        x = x + self.dropout(self.block(self.norm2(x)))
+        if self.block_first:
+            # ── Block → Attention ───────────────────────────────────────────
+            x = x + self.dropout(self.block(self.norm1(x)))
+            normed = self.norm2(x)
+            attn_out, _ = self.self_attn(
+                normed, normed, normed,
+                attn_mask=attn_mask,
+                key_padding_mask=key_padding_mask,
+                need_weights=False,
+            )
+            x = x + self.dropout(attn_out)
+        else:
+            # ── Attention → Block (default) ─────────────────────────────────
+            normed = self.norm1(x)
+            attn_out, _ = self.self_attn(
+                normed, normed, normed,
+                attn_mask=attn_mask,
+                key_padding_mask=key_padding_mask,
+                need_weights=False,
+            )
+            x = x + self.dropout(attn_out)
+            x = x + self.dropout(self.block(self.norm2(x)))
 
         return x
 
@@ -99,11 +119,12 @@ class DecoderOnlyTransformer(nn.Module):
         dropout: float = 0.1,
         block_kwargs: dict = None,
         looped: bool = False,
+        block_first: bool = False,
     ):
         super().__init__()
         self.d_model   = d_model
         self.pad_idx   = pad_idx
-        self.n_loops   = n_layers   # how many times to apply the layer(s)
+        self.n_loops   = n_layers
         self.looped    = looped
 
         block_kwargs = block_kwargs or {}
@@ -113,10 +134,6 @@ class DecoderOnlyTransformer(nn.Module):
         self.pos_embedding   = nn.Embedding(max_seq_len, d_model)
         self.drop_in         = nn.Dropout(dropout)
 
-        # ── Transformer stack ───────────────────────────────────────────────
-        # Looped: one shared layer applied n_layers times (weight tying across depth).
-        # Non-looped: n_layers independent layers (existing behaviour).
-        # Either way self.layers is a ModuleList so instrumentation works uniformly.
         n_distinct = 1 if looped else n_layers
         self.layers = nn.ModuleList([
             TransformerLayer(
@@ -124,6 +141,7 @@ class DecoderOnlyTransformer(nn.Module):
                 nhead=nhead,
                 block=make_block(block_type, d_model, ffn_dim, dropout, **block_kwargs),
                 dropout=dropout,
+                block_first=block_first,
             )
             for _ in range(n_distinct)
         ])
@@ -290,6 +308,7 @@ def make_model(
     block_type: str  = "plain_mlp",
     block_kwargs: dict = None,
     looped: bool     = False,
+    block_first: bool = False,
 ) -> DecoderOnlyTransformer:
     """Convenience constructor — all config in one place."""
     return DecoderOnlyTransformer(
@@ -304,6 +323,7 @@ def make_model(
         dropout      = dropout,
         block_kwargs = block_kwargs or {},
         looped       = looped,
+        block_first  = block_first,
     )
 
 

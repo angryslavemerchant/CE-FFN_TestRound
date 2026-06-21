@@ -55,6 +55,7 @@ class Config:
     max_seq_len: int       = 128
     block_type:  str       = "plain_mlp"
     looped:      bool      = False
+    block_first: bool      = False
     n_experts:      int    = 4
     comp_dim:       int    = 64    # internal projection dim for routing and composition attention
     d_model:        int    = 128
@@ -106,7 +107,6 @@ def evaluate(model, dataset: PCFGDataset, vocab: Vocabulary,
     return n_correct / n_total if n_total else 0.0
 
 
-
 def train(cfg: Config):
     random.seed(cfg.seed)
     torch.manual_seed(cfg.seed)
@@ -115,10 +115,11 @@ def train(cfg: Config):
     ensure_data(cfg.data_dir)
 
     device   = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    loop_tag = "_looped" if cfg.looped else ""
-    run_name = f"{cfg.block_type}{loop_tag}_dm{cfg.d_model}_L{cfg.n_layers}_seed{cfg.seed}"
+    loop_tag  = "_looped"     if cfg.looped      else ""
+    order_tag = "_blockfirst" if cfg.block_first else ""
+    run_name  = f"{cfg.block_type}{loop_tag}{order_tag}_dm{cfg.d_model}_L{cfg.n_layers}_seed{cfg.seed}"
 
-    wandb.init(project="composing-experts-looped", name=run_name, config=cfg.__dict__)
+    wandb.init(project="composing-experts", name=run_name, config=cfg.__dict__)
 
     vocab = build_vocab(cfg.data_dir)
 
@@ -149,9 +150,8 @@ def train(cfg: Config):
         dropout=cfg.dropout, block_type=cfg.block_type,
         block_kwargs={"n_experts": cfg.n_experts, "comp_dim": cfg.comp_dim},
         looped=cfg.looped,
+        block_first=cfg.block_first,
     ).to(device)
-
-    model = torch.compile(model)
 
     print(f"{run_name}  |  params: {count_params(model):,}  |  device: {device}")
 
@@ -244,6 +244,8 @@ def parse_args() -> Config:
                    choices=["plain_mlp", "composing_experts", "averaging_experts"], dest="block_type")
     p.add_argument("--looped",      action="store_true",
                    help="Share weights across all layers (Universal Transformer style)")
+    p.add_argument("--block_first", action="store_true",
+                   help="Apply FFN block before attention in each layer (default: attention first)")
     p.add_argument("--n_experts",       type=int,   default=4)
     p.add_argument("--comp_dim",        type=int,   default=64,
                    help="internal projection dim for routing and composition attention (< d_model)")

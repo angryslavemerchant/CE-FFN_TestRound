@@ -130,10 +130,10 @@ if __name__ == "__main__":
     p.add_argument("--d_model",   type=int, default=128)
     p.add_argument("--ffn_dim",   type=int, default=512,
                    help="ffn_dim used for the experts block")
-    p.add_argument("--n_experts", type=int, default=8)
+    p.add_argument("--n_experts", type=int, default=16)
     p.add_argument("--n_layers",  type=int, default=1)
     p.add_argument("--seq_len",   type=int, default=32)
-    p.add_argument("--comp_dim",  type=int, default=32,
+    p.add_argument("--comp_dim",  type=int, default=128,
                    help="projection dim for routing and composition attention "
                         "(default: d_model // 2, so it acts as a bottleneck)")
     a = p.parse_args()
