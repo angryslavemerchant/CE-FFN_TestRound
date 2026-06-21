@@ -98,11 +98,13 @@ class DecoderOnlyTransformer(nn.Module):
         pad_idx: int,
         dropout: float = 0.1,
         block_kwargs: dict = None,
+        looped: bool = False,
     ):
         super().__init__()
         self.d_model   = d_model
         self.pad_idx   = pad_idx
-        self.max_seq_len = max_seq_len
+        self.n_loops   = n_layers   # how many times to apply the layer(s)
+        self.looped    = looped
 
         block_kwargs = block_kwargs or {}
 
@@ -112,6 +114,10 @@ class DecoderOnlyTransformer(nn.Module):
         self.drop_in         = nn.Dropout(dropout)
 
         # ── Transformer stack ───────────────────────────────────────────────
+        # Looped: one shared layer applied n_layers times (weight tying across depth).
+        # Non-looped: n_layers independent layers (existing behaviour).
+        # Either way self.layers is a ModuleList so instrumentation works uniformly.
+        n_distinct = 1 if looped else n_layers
         self.layers = nn.ModuleList([
             TransformerLayer(
                 d_model=d_model,
@@ -119,7 +125,7 @@ class DecoderOnlyTransformer(nn.Module):
                 block=make_block(block_type, d_model, ffn_dim, dropout, **block_kwargs),
                 dropout=dropout,
             )
-            for _ in range(n_layers)
+            for _ in range(n_distinct)
         ])
 
         self.norm = nn.LayerNorm(d_model)
@@ -158,7 +164,7 @@ class DecoderOnlyTransformer(nn.Module):
             key_padding_mask = (input_ids == self.pad_idx)
 
         # Embeddings
-        positions = torch.arange(T, device=device).unsqueeze(0).clamp(max=self.max_seq_len - 1)
+        positions = torch.arange(T, device=device).unsqueeze(0)  # (1, T)
         x = self.drop_in(
             self.token_embedding(input_ids) + self.pos_embedding(positions)
         )
@@ -167,9 +173,14 @@ class DecoderOnlyTransformer(nn.Module):
         # Using bool dtype matches key_padding_mask and avoids a PyTorch deprecation warning.
         causal = torch.triu(torch.ones(T, T, device=device, dtype=torch.bool), diagonal=1)
 
-        # Transformer layers
-        for layer in self.layers:
-            x = layer(x, attn_mask=causal, key_padding_mask=key_padding_mask)
+        # Transformer layers — shared layer applied n_loops times if looped,
+        # otherwise each independent layer applied once.
+        if self.looped:
+            for _ in range(self.n_loops):
+                x = self.layers[0](x, attn_mask=causal, key_padding_mask=key_padding_mask)
+        else:
+            for layer in self.layers:
+                x = layer(x, attn_mask=causal, key_padding_mask=key_padding_mask)
 
         x = self.norm(x)
         logits = self.lm_head(x)   # (B, T, V)
@@ -197,7 +208,7 @@ class DecoderOnlyTransformer(nn.Module):
         bos_idx: int,
         sep_idx: int,
         eos_idx: int,
-        max_gen_len: int = 50,
+        max_gen_len: int = 100,
     ) -> list:
         """
         Batched greedy decoding.
@@ -268,6 +279,7 @@ def make_model(
     dropout: float   = 0.1,
     block_type: str  = "plain_mlp",
     block_kwargs: dict = None,
+    looped: bool     = False,
 ) -> DecoderOnlyTransformer:
     """Convenience constructor — all config in one place."""
     return DecoderOnlyTransformer(
@@ -281,6 +293,7 @@ def make_model(
         pad_idx      = pad_idx,
         dropout      = dropout,
         block_kwargs = block_kwargs or {},
+        looped       = looped,
     )
 
 

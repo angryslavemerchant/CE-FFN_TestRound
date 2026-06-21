@@ -54,6 +54,7 @@ class Config:
     eval_splits: List[str] = field(default_factory=lambda: ["pcfgset"])
     max_seq_len: int       = 128
     block_type:  str       = "plain_mlp"
+    looped:      bool      = False
     n_experts:      int    = 4
     comp_dim:       int    = 64    # internal projection dim for routing and composition attention
     d_model:        int    = 128
@@ -113,7 +114,8 @@ def train(cfg: Config):
     ensure_data(cfg.data_dir)
 
     device   = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    run_name = f"{cfg.block_type}_dm{cfg.d_model}_L{cfg.n_layers}_seed{cfg.seed}"
+    loop_tag = "_looped" if cfg.looped else ""
+    run_name = f"{cfg.block_type}{loop_tag}_dm{cfg.d_model}_L{cfg.n_layers}_seed{cfg.seed}"
 
     wandb.init(project="composing-experts", name=run_name, config=cfg.__dict__)
 
@@ -145,9 +147,8 @@ def train(cfg: Config):
         ffn_dim=ffn_dim, max_seq_len=cfg.max_seq_len,
         dropout=cfg.dropout, block_type=cfg.block_type,
         block_kwargs={"n_experts": cfg.n_experts, "comp_dim": cfg.comp_dim},
+        looped=cfg.looped,
     ).to(device)
-
-    model = torch.compile(model) #should make it faster
 
     print(f"{run_name}  |  params: {count_params(model):,}  |  device: {device}")
 
@@ -238,6 +239,8 @@ def parse_args() -> Config:
     p.add_argument("--eval_splits", nargs="+", default=["pcfgset"])
     p.add_argument("--block",       default="plain_mlp",
                    choices=["plain_mlp", "composing_experts", "averaging_experts"], dest="block_type")
+    p.add_argument("--looped",      action="store_true",
+                   help="Share weights across all layers (Universal Transformer style)")
     p.add_argument("--n_experts",       type=int,   default=4)
     p.add_argument("--comp_dim",        type=int,   default=64,
                    help="internal projection dim for routing and composition attention (< d_model)")
