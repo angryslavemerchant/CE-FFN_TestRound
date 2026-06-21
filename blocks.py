@@ -101,6 +101,10 @@ class ComposingExpertsBlock(nn.Module):
         self.W2 = nn.Parameter(torch.empty(n_experts, expert_ffn, d_model))
         self.b2 = nn.Parameter(torch.zeros(n_experts, d_model))
 
+
+        # Note: W1 stored as (N, d_model, expert_ffn) — kaiming_uniform_ uses size(1)=expert_ffn
+        # as fan_in rather than d_model. Intentionally kept; produces slightly larger initial
+        # weights in W1 and smaller in W2 vs a faithful nn.Linear equivalent.
         for i in range(n_experts):
             nn.init.kaiming_uniform_(self.W1[i], a=math.sqrt(5))
             nn.init.kaiming_uniform_(self.W2[i], a=math.sqrt(5))
