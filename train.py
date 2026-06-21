@@ -11,6 +11,7 @@ import argparse
 import math
 import os
 import random
+import subprocess
 from dataclasses import dataclass, field
 from typing import List, Optional
 
@@ -24,9 +25,30 @@ from data import build_vocab, load_pairs, PCFGDataset, make_loader, Vocabulary
 from model import make_model, count_params
 
 
+def ensure_data(data_dir: str):
+    """Clone am-i-compositional if data_dir doesn't exist."""
+    if os.path.exists(data_dir):
+        return
+    repo_dir = "am-i-compositional"
+    if not os.path.exists(repo_dir):
+        print("Data not found. Cloning am-i-compositional...")
+        subprocess.run(
+            ["git", "clone", "https://github.com/i-machine-think/am-i-compositional.git"],
+            check=True,
+        )
+    else:
+        print("Repo already cloned, skipping.")
+    if not os.path.exists(data_dir):
+        raise FileNotFoundError(
+            f"Cloned repo but still can't find: {data_dir}\n"
+            f"Check the folder structure inside am-i-compositional/"
+        )
+    print(f"Data ready at: {data_dir}\n")
+
+
 @dataclass
 class Config:
-    data_dir:    str       = "/home/claude/am-i-compositional/data/pcfgset"
+    data_dir:    str       = "am-i-compositional/data/pcfgset"
     output_dir:  str       = "runs"
     train_split: str       = "pcfgset"
     eval_splits: List[str] = field(default_factory=lambda: ["pcfgset"])
@@ -84,6 +106,8 @@ def train(cfg: Config):
     random.seed(cfg.seed)
     torch.manual_seed(cfg.seed)
     torch.cuda.manual_seed_all(cfg.seed)
+
+    ensure_data(cfg.data_dir)
 
     device   = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     run_name = f"{cfg.block_type}_dm{cfg.d_model}_L{cfg.n_layers}_seed{cfg.seed}"
@@ -180,7 +204,7 @@ def train(cfg: Config):
 
 def parse_args() -> Config:
     p = argparse.ArgumentParser()
-    p.add_argument("--data_dir",    default="/home/claude/am-i-compositional/data/pcfgset")
+    p.add_argument("--data_dir",    default="am-i-compositional/data/pcfgset")
     p.add_argument("--output_dir",  default="runs")
     p.add_argument("--train_split", default="pcfgset")
     p.add_argument("--eval_splits", nargs="+", default=["pcfgset"])
