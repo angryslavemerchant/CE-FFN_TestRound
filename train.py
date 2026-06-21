@@ -106,6 +106,7 @@ def evaluate(model, dataset: PCFGDataset, vocab: Vocabulary,
     return n_correct / n_total if n_total else 0.0
 
 
+
 def train(cfg: Config):
     random.seed(cfg.seed)
     torch.manual_seed(cfg.seed)
