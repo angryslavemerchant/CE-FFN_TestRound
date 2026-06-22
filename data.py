@@ -12,6 +12,7 @@ hot path.
 """
 
 import os
+import random
 import torch
 from torch.utils.data import Dataset, DataLoader
 from torch.nn.utils.rnn import pad_sequence
@@ -156,6 +157,36 @@ def collate(batch, pad_idx: int):
     ids_padded  = pad_sequence(ids_list,  batch_first=True, padding_value=pad_idx)
     mask_padded = pad_sequence(mask_list, batch_first=True, padding_value=0.0)
     return ids_padded, mask_padded, list(srcs), list(tgts)
+
+
+def build_modular_vocab(p: int) -> Vocabulary:
+    """Vocabulary for modular addition: integers 0..p-1 as string tokens."""
+    return Vocabulary().build([[str(i) for i in range(p)]])
+
+
+def generate_modular_addition(
+    p: int,
+    train_frac: float,
+    seed: int,
+) -> Tuple[Tuple[List[List[str]], List[List[str]]], Tuple[List[List[str]], List[List[str]]]]:
+    """
+    Generate all p² (a, b) pairs for modular addition (a + b) mod p.
+    Returns ((train_srcs, train_tgts), (test_srcs, test_tgts)).
+    src = [str(a), str(b)], tgt = [str((a+b) % p)]
+    """
+    rng = random.Random(seed)
+    all_pairs = [(a, b) for a in range(p) for b in range(p)]
+    rng.shuffle(all_pairs)
+    n_train = int(len(all_pairs) * train_frac)
+    train_pairs = all_pairs[:n_train]
+    test_pairs  = all_pairs[n_train:]
+
+    def to_src_tgt(pairs):
+        srcs = [[str(a), str(b)] for a, b in pairs]
+        tgts = [[str((a + b) % p)] for a, b in pairs]
+        return srcs, tgts
+
+    return to_src_tgt(train_pairs), to_src_tgt(test_pairs)
 
 
 def make_loader(
