@@ -79,6 +79,7 @@ class Config:
     lr:          float     = 3e-4
     weight_decay: float    = 0.01
     warmup_steps: int      = 1000
+    decay_frac:   float    = 0.0   # 0 = warmup+constant; >0 = linear tail decay over final frac
     max_steps:   int       = 50_000
     grad_clip:   float     = 1.0
     seed:        int       = 42
@@ -222,12 +223,24 @@ def ensure_data(data_dir: str):
         raise FileNotFoundError(f"Cloned repo but can't find {data_dir}")
 
 
-def make_scheduler(optimizer, warmup_steps, max_steps):
+def make_scheduler(optimizer, warmup_steps, max_steps, decay_frac=0.0):
+    """Warmup -> constant -> (optional) linear tail decay.
+
+    decay_frac = 0.0  : warmup then flat forever. No horizon to guess, identical
+                        across models, safe to stop whenever loss plateaus. Default
+                        for iteration / matched-comparison runs.
+    decay_frac > 0.0  : WSD-style. Hold flat, then decay linearly to 0 over the final
+                        `decay_frac` of max_steps. Use for a single best-case final run
+                        on the winner (set max_steps to where you decided to stop).
+    """
+    decay_start = max_steps * (1.0 - decay_frac)
     def lr_lambda(step):
         if step < warmup_steps:
-            return step / max(1, warmup_steps)
-        progress = (step - warmup_steps) / max(1, max_steps - warmup_steps)
-        return 0.5 * (1.0 + math.cos(math.pi * progress))
+            return step / max(1, warmup_steps)        # linear warmup ramp
+        if decay_frac <= 0.0 or step < decay_start:
+            return 1.0                                 # flat
+        p = (step - decay_start) / max(1, max_steps - decay_start)
+        return max(0.0, 1.0 - p)                       # linear decay to 0
     return LambdaLR(optimizer, lr_lambda)
 
 
@@ -278,7 +291,7 @@ def train(cfg: Config):
 
     optimizer = AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay,
                       betas=(0.9, 0.98), eps=1e-9)
-    scheduler = make_scheduler(optimizer, cfg.warmup_steps, cfg.max_steps)
+    scheduler = make_scheduler(optimizer, cfg.warmup_steps, cfg.max_steps, cfg.decay_frac)
 
     run_dir = os.path.join(cfg.output_dir, run_name)
     os.makedirs(run_dir, exist_ok=True)
@@ -348,6 +361,9 @@ def parse_args() -> Config:
     p.add_argument("--lr", type=float, default=3e-4)
     p.add_argument("--weight_decay", type=float, default=0.01)
     p.add_argument("--warmup_steps", type=int, default=1000)
+    p.add_argument("--decay_frac", type=float, default=0.0,
+                   help="0 = warmup+constant (default, for comparison runs); "
+                        ">0 = linear tail decay over final frac of max_steps (final best-case run)")
     p.add_argument("--max_steps", type=int, default=50_000)
     p.add_argument("--grad_clip", type=float, default=1.0)
     p.add_argument("--seed", type=int, default=42)
