@@ -29,6 +29,7 @@ from dataclasses import dataclass, field
 from typing import List, Optional
 
 import torch
+import torch._dynamo
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import LambdaLR
 from tqdm.auto import tqdm
@@ -38,6 +39,7 @@ from data import (build_vocab, load_pairs, PCFGDataset, make_loader, Vocabulary,
 from model import make_model, count_params as count_params_tf
 from mhmp import make_mhmp, count_params as count_params_mhmp
 
+torch._dynamo.config.capture_scalar_outputs = True
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  Optional wandb (no-op shim if disabled or unavailable)
