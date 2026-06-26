@@ -116,6 +116,7 @@ class Config:
     # ── runtime ────────────────────────────────────────────────────────────────
     use_wandb:    bool = True
     smoke:        bool = False
+    compile:      bool = False   # torch.compile the training forward (GPU; see caveats)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -289,6 +290,22 @@ def train(cfg: Config):
     print(f"{run_name}  |  params: {n_params:,}  |  device: {device}")
     wb.init(project="mhmp-exp2", name=run_name, config=cfg.__dict__)
 
+    # torch.compile wraps the model for the TRAINING forward only. The wrapper
+    # shares parameters with `model`, so the optimizer (built on model.parameters())
+    # and eager eval (model.greedy_decode) both stay in sync automatically.
+    # Eval/decode deliberately stays eager: greedy_decode grows the sequence one
+    # token per step, so compiling it would trigger constant recompilation.
+    # Caveats: (1) Windows + CUDA torch.compile is finicky — treat as best-effort;
+    # if it errors at first step, drop --compile. (2) _split_packed has data-dependent
+    # control flow (.item(), python loops) so the graph breaks there; the speedup
+    # comes from the compiled encoder/loop/decoder, which is where the compute is.
+    train_model = model
+    if cfg.compile:
+        if device.type != "cuda":
+            print("[warn] --compile requested on non-CUDA device; benefit is on GPU.")
+        print("[compile] torch.compile(model) — first step will be slow (tracing).")
+        train_model = torch.compile(model)
+
     optimizer = AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay,
                       betas=(0.9, 0.98), eps=1e-9)
     scheduler = make_scheduler(optimizer, cfg.warmup_steps, cfg.max_steps, cfg.decay_frac)
@@ -304,7 +321,7 @@ def train(cfg: Config):
             if step >= cfg.max_steps:
                 break
             # ── identical inner step for both models ──────────────────────────
-            _, loss = model(input_ids.to(device), loss_mask=loss_mask.to(device))
+            _, loss = train_model(input_ids.to(device), loss_mask=loss_mask.to(device))
             optimizer.zero_grad(); loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
             optimizer.step(); scheduler.step()
@@ -396,6 +413,9 @@ def parse_args() -> Config:
     # runtime
     p.add_argument("--no_wandb", action="store_true")
     p.add_argument("--smoke", action="store_true")
+    p.add_argument("--compile", action="store_true",
+                   help="torch.compile the training forward for speedup (GPU). "
+                        "Eval stays eager. Windows+CUDA is finicky; drop if it errors.")
 
     a = p.parse_args()
     kwargs = {k: v for k, v in vars(a).items() if k in Config.__dataclass_fields__}
