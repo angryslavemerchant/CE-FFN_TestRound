@@ -193,7 +193,7 @@ def make_loader(
     dataset: PCFGDataset,
     batch_size: int,
     shuffle: bool,
-    num_workers: int = 4,
+    num_workers: int = 8,
 ) -> DataLoader:
     pad_idx = dataset.vocab.pad_idx
     return DataLoader(
