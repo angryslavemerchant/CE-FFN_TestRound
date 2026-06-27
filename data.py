@@ -193,7 +193,7 @@ def make_loader(
     dataset: PCFGDataset,
     batch_size: int,
     shuffle: bool,
-    num_workers: int = 2,
+    num_workers: int = 4,
 ) -> DataLoader:
     pad_idx = dataset.vocab.pad_idx
     return DataLoader(
@@ -204,5 +204,4 @@ def make_loader(
         collate_fn=lambda b: collate(b, pad_idx),
         pin_memory=True,
         persistent_workers=(num_workers > 0),
-        prefetch_factor=4,
     )
