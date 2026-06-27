@@ -324,7 +324,7 @@ def train(cfg: Config):
     else:
         run_name += f"_L{cfg.n_layers}_ffn{cfg.ffn_dim_plain}"
     print(f"{run_name}  |  params: {n_params:,}  |  device: {device}")
-    wb.init(project="mhmp-exp2", name=run_name, config=cfg.__dict__)
+    wb.init(project="mhmp-systematicity", name=run_name, config=cfg.__dict__)
 
     # torch.compile wraps the model for the TRAINING forward only. The wrapper
     # shares parameters with `model`, so the optimizer (built on model.parameters())
