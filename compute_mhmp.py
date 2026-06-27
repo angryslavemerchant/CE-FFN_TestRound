@@ -97,6 +97,16 @@ def transformer_flops(d, n_layers, ffn_dim, N, vocab):
     return n_layers * per_layer + 2 * (N * d * vocab)
 
 
+def enc_dec_flops(d, n_enc, n_dec, ffn_dim, N, A, vocab):
+    """Plain cross-attn encoder-decoder. N = encoder src length, A = decoder length.
+    Decoder cross-attends to the FULL N memory (contrast: MHMP cross-attends to M)."""
+    enc = n_enc * (attn_flops(N, N, d) + ffn_flops(N, d, ffn_dim))
+    dec = n_dec * (attn_flops(A, A, d)        # causal self
+                   + attn_flops(A, N, d)      # cross to full N memory
+                   + ffn_flops(A, d, ffn_dim))
+    return enc + dec + 2 * (A * d * vocab)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 #  Baseline matching: size a transformer to MHMP's FLOPs / params
 # ─────────────────────────────────────────────────────────────────────────────
@@ -194,6 +204,23 @@ def main(a):
         print(f"\n  → FLOP-match and param-match diverge: pick FLOP-match as the primary")
         print(f"    comparison (CE's lesson was compute, not params), param-match as footnote.")
 
+        # ── Plain enc-dec control, FLOP-matched (the stage-2 disentangler) ────
+        from enc_dec import make_enc_dec, count_params as count_params_ed
+        ne, nd = a.match_n_enc, a.match_n_dec
+        best_f, best_err = None, float("inf")
+        for f in range(16, 4097, 16):
+            fl_ed = enc_dec_flops(md, ne, nd, f, N, A, vocab)
+            if abs(fl_ed - fl["TOTAL"]) < best_err:
+                best_f, best_err = f, abs(fl_ed - fl["TOTAL"])
+        ed_fl = enc_dec_flops(md, ne, nd, best_f, N, A, vocab)
+        m_ed = make_enc_dec(vocab, 0, 3, d_model=md, n_enc_layers=ne, n_dec_layers=nd,
+                            nhead=max(1, md // 32), ffn_dim=best_f, max_seq_len=max(128, N + A))
+        print(f"\n  PLAIN ENC-DEC CONTROL  (d={md}, enc={ne}, dec={nd})")
+        print(f"  FLOP-matched : ffn_dim={best_f}")
+        print(f"                 FLOPs {fmt_f(ed_fl)}  ({ed_fl/fl['TOTAL']*100:.1f}% of MHMP)")
+        print(f"                 params {fmt_p(count_params_ed(m_ed))}  (MHMP: {fmt_p(mhmp_params)})")
+        print(f"  → isolates 'masked loop helps' from 'enc-dec structure helps'.")
+
         print(f"\n  Run commands:")
         print(f"    python train_exp2.py --model mhmp --d_model {a.d_model} "
               f"--n_latents {a.n_latents} --n_mask_heads {a.n_mask_heads} --n_loops {a.n_loops} "
@@ -206,22 +233,24 @@ def main(a):
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--vocab_size", type=int, default=535)
-    p.add_argument("--seq_len", type=int, default=128, help="encoder input length N")
+    p.add_argument("--seq_len", type=int, default=64, help="encoder input length N")
     p.add_argument("--ans_len", type=int, default=16, help="decoder length A")
     # mhmp knobs
     p.add_argument("--d_model", type=int, default=128)
     p.add_argument("--n_latents", type=int, default=64)
-    p.add_argument("--n_mask_heads", type=int, default=8)
+    p.add_argument("--n_mask_heads", type=int, default=4)
     p.add_argument("--n_loops", type=int, default=6)
     p.add_argument("--mask_dim", type=int, default=64)
     p.add_argument("--film_hidden", type=int, default=64)
-    p.add_argument("--reason_nhead", type=int, default=16)
+    p.add_argument("--reason_nhead", type=int, default=4)
     p.add_argument("--n_enc_layers", type=int, default=2)
     p.add_argument("--n_dec_layers", type=int, default=2)
     p.add_argument("--enc_nhead", type=int, default=4)
     p.add_argument("--dec_nhead", type=int, default=4)
-    p.add_argument("--ffn_dim", type=int, default=128)
+    p.add_argument("--ffn_dim", type=int, default=256)
     # baseline to match (optional)
-    p.add_argument("--match_d_model", type=int, default=128)
+    p.add_argument("--match_d_model", type=int, default=None)
     p.add_argument("--match_n_layers", type=int, default=4)
+    p.add_argument("--match_n_enc", type=int, default=4, help="enc-dec control: encoder layers")
+    p.add_argument("--match_n_dec", type=int, default=4, help="enc-dec control: decoder layers")
     main(p.parse_args())

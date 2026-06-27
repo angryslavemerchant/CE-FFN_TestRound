@@ -238,13 +238,15 @@ class DecoderLayer(nn.Module):
         self.norm3 = nn.LayerNorm(d_model)
         self.drop = nn.Dropout(dropout)
 
-    def forward(self, y, memory, causal_mask, tgt_key_padding_mask=None):
+    def forward(self, y, memory, causal_mask, tgt_key_padding_mask=None,
+                memory_key_padding_mask=None):
         n = self.norm1(y)
         a, _ = self.self_attn(n, n, n, attn_mask=causal_mask,
                               key_padding_mask=tgt_key_padding_mask, need_weights=False)
         y = y + self.drop(a)
         n = self.norm2(y)
-        c, _ = self.cross(n, memory, memory, need_weights=False)
+        c, _ = self.cross(n, memory, memory,
+                          key_padding_mask=memory_key_padding_mask, need_weights=False)
         y = y + self.drop(c)
         y = y + self.drop(self.ffn(self.norm3(y)))
         return y

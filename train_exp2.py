@@ -37,6 +37,7 @@ from data import (build_vocab, load_pairs, PCFGDataset, make_loader, Vocabulary,
                   PAD, BOS, EOS, SEP, SPECIAL_TOKENS)
 from model import make_model, count_params as count_params_tf
 from mhmp import make_mhmp, count_params as count_params_mhmp
+from enc_dec import make_enc_dec, count_params as count_params_ed
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -66,7 +67,7 @@ def get_wandb(enabled: bool):
 @dataclass
 class Config:
     # ── which architecture ───────────────────────────────────────────────────
-    model: str = "transformer"          # "transformer" | "mhmp"
+    model: str = "transformer"          # "transformer" | "mhmp" | "enc_dec"
 
     # ── data / protocol (SHARED, identical across models) ─────────────────────
     data_dir:    str       = "am-i-compositional/data/pcfgset"
@@ -113,6 +114,10 @@ class Config:
     ffn_dim:      int = 256     # FFN dim used inside MHMP (enc/dec/reason)
     latent_init:  str = "learned"   # "learned" | "input_seeded"
 
+    # ── enc_dec-only (plain cross-attn encoder-decoder baseline) ─────────────
+    # reuses n_enc_layers / n_dec_layers / ffn_dim / d_model; its attention heads:
+    ed_nhead:     int = 4
+
     # ── runtime ────────────────────────────────────────────────────────────────
     use_wandb:    bool = True
     smoke:        bool = False
@@ -144,6 +149,14 @@ def build_model(cfg: Config, vocab: Vocabulary, device):
             latent_init=cfg.latent_init,
         ).to(device)
         return m, count_params_mhmp(m)
+    elif cfg.model == "enc_dec":
+        m = make_enc_dec(
+            vocab_size=len(vocab), pad_idx=vocab.pad_idx, sep_idx=vocab.sep_idx,
+            d_model=cfg.d_model, n_enc_layers=cfg.n_enc_layers, n_dec_layers=cfg.n_dec_layers,
+            nhead=cfg.ed_nhead, ffn_dim=cfg.ffn_dim, max_seq_len=cfg.max_seq_len,
+            dropout=cfg.dropout,
+        ).to(device)
+        return m, count_params_ed(m)
     raise ValueError(f"unknown model {cfg.model}")
 
 
@@ -285,6 +298,8 @@ def train(cfg: Config):
     run_name = f"{cfg.model}_dm{cfg.d_model}_seed{cfg.seed}"
     if cfg.model == "mhmp":
         run_name += f"_M{cfg.n_latents}_H{cfg.n_mask_heads}_T{cfg.n_loops}"
+    elif cfg.model == "enc_dec":
+        run_name += f"_enc{cfg.n_enc_layers}_dec{cfg.n_dec_layers}_ffn{cfg.ffn_dim}"
     else:
         run_name += f"_L{cfg.n_layers}_ffn{cfg.ffn_dim_plain}"
     print(f"{run_name}  |  params: {n_params:,}  |  device: {device}")
@@ -366,7 +381,7 @@ def train(cfg: Config):
 
 def parse_args() -> Config:
     p = argparse.ArgumentParser()
-    p.add_argument("--model", choices=["transformer", "mhmp"], default="transformer")
+    p.add_argument("--model", choices=["transformer", "mhmp", "enc_dec"], default="transformer")
     # protocol
     p.add_argument("--data_dir", default="am-i-compositional/data/pcfgset")
     p.add_argument("--output_dir", default="runs")
@@ -410,6 +425,8 @@ def parse_args() -> Config:
     p.add_argument("--dec_nhead", type=int, default=4)
     p.add_argument("--ffn_dim", type=int, default=256)
     p.add_argument("--latent_init", choices=["learned", "input_seeded"], default="learned")
+    # enc_dec
+    p.add_argument("--ed_nhead", type=int, default=4)
     # runtime
     p.add_argument("--no_wandb", action="store_true")
     p.add_argument("--smoke", action="store_true")
