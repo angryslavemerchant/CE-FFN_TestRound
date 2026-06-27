@@ -73,7 +73,7 @@ class Config:
     data_dir:    str       = "am-i-compositional/data/pcfgset"
     output_dir:  str       = "runs"
     train_split: str       = "pcfgset"
-    eval_splits: List[str] = field(default_factory=lambda: ["pcfgset"])
+    eval_splits: List[str] = field(default_factory=lambda: ["pcfgset", "systematicity"])
     max_seq_len: int       = 128
     dropout:     float     = 0.1
     batch_size:  int       = 256
@@ -281,8 +281,28 @@ def train(cfg: Config):
         tr_s, tr_t = load_pairs(f"{cfg.data_dir}/{cfg.train_split}/train.src",
                                 f"{cfg.data_dir}/{cfg.train_split}/train.tgt", cfg.max_seq_len)
         train_ds = PCFGDataset(tr_s, tr_t, vocab)
+
+        # Generalization splits (systematicity, productivity, ...) are RE-SPLITS of
+        # the training data: each holds specific combinations OUT of its own train set
+        # and concentrates them in its test set. A test score is only a valid
+        # generalization measure if you TRAINED on that same split's train set.
+        # Evaluating, say, systematicity/test with a model trained on the i.i.d.
+        # pcfgset/train is meaningless — the held-out combinations were NOT held out.
+        GEN_SPLITS = {"systematicity", "productivity", "substitutivity",
+                      "localism", "overgeneralisation"}
+        for split in cfg.eval_splits:
+            if split in GEN_SPLITS and split != cfg.train_split:
+                print(f"  [!] eval split '{split}' is a GENERALIZATION test but you are "
+                      f"training on '{cfg.train_split}'.\n"
+                      f"      Its score is NOT a valid {split} measure — to test {split}, "
+                      f"run with --train_split {split}.\n"
+                      f"      (Keeping it as an extra eval, but read it as in-distribution, "
+                      f"not generalization.)")
+
         eval_datasets = {}
         for split in cfg.eval_splits:
+            # pcfgset has a dev set (the shared dev/health split); generalization
+            # splits only have train/test, so eval their test set.
             fname = "dev" if split == "pcfgset" else "test"
             sp, tp = f"{cfg.data_dir}/{split}/{fname}.src", f"{cfg.data_dir}/{split}/{fname}.tgt"
             if not os.path.exists(sp):
@@ -386,7 +406,10 @@ def parse_args() -> Config:
     p.add_argument("--data_dir", default="am-i-compositional/data/pcfgset")
     p.add_argument("--output_dir", default="runs")
     p.add_argument("--train_split", default="pcfgset")
-    p.add_argument("--eval_splits", nargs="+", default=["pcfgset"])
+    p.add_argument("--eval_splits", nargs="+", default=["pcfgset", "systematicity"],
+                   help="splits to eval. 'pcfgset' = i.i.d. dev (health/divergence signal); "
+                        "a generalization split (e.g. systematicity) is only a valid measure "
+                        "if --train_split is set to that same split.")
     p.add_argument("--max_seq_len", type=int, default=128)
     p.add_argument("--dropout", type=float, default=0.1)
     p.add_argument("--batch_size", type=int, default=256)
