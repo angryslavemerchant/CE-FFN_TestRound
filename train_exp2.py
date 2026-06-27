@@ -121,6 +121,7 @@ class Config:
     # ── runtime ────────────────────────────────────────────────────────────────
     use_wandb:    bool = True
     smoke:        bool = False
+    resume:       str  = ""    # path to a ckpt_*.pt to continue training from
     compile:      bool = False   # torch.compile the training forward (GPU; see caveats)
 
 
@@ -323,7 +324,7 @@ def train(cfg: Config):
     else:
         run_name += f"_L{cfg.n_layers}_ffn{cfg.ffn_dim_plain}"
     print(f"{run_name}  |  params: {n_params:,}  |  device: {device}")
-    wb.init(project="mhmp-systematicity", name=run_name, config=cfg.__dict__)
+    wb.init(project="mhmp-exp2", name=run_name, config=cfg.__dict__)
 
     # torch.compile wraps the model for the TRAINING forward only. The wrapper
     # shares parameters with `model`, so the optimizer (built on model.parameters())
@@ -345,11 +346,37 @@ def train(cfg: Config):
                       betas=(0.9, 0.98), eps=1e-9)
     scheduler = make_scheduler(optimizer, cfg.warmup_steps, cfg.max_steps, cfg.decay_frac)
 
+    # ── Resume from a checkpoint (model always; optimizer/scheduler if present) ──
+    start_step = 0
+    if cfg.resume:
+        ckpt = torch.load(cfg.resume, map_location=device)
+        # architecture must match — load_state_dict will raise clearly if not
+        model.load_state_dict(ckpt["model"])
+        start_step = ckpt.get("step", 0)
+        if "optimizer" in ckpt:
+            optimizer.load_state_dict(ckpt["optimizer"])
+            print(f"  [resume] loaded optimizer state (AdamW moments preserved)")
+        else:
+            print(f"  [resume] checkpoint has NO optimizer state — AdamW moments reset to "
+                  f"zero.\n             Expect a brief loss transient while moments re-estimate.")
+        if "scheduler" in ckpt:
+            scheduler.load_state_dict(ckpt["scheduler"])
+        else:
+            # fast-forward the LR schedule to start_step (initial_lr already set at construction)
+            scheduler.last_epoch = start_step - 1
+            scheduler.step()
+        print(f"  [resume] continuing '{cfg.resume}' from step {start_step} "
+              f"(lr now {scheduler.get_last_lr()[0]:.2e}, target max_steps {cfg.max_steps})")
+        if start_step >= cfg.max_steps:
+            print(f"  [resume] !! start_step {start_step} >= max_steps {cfg.max_steps}: "
+                  f"raise --max_steps to actually train further.")
+
     run_dir = os.path.join(cfg.output_dir, run_name)
     os.makedirs(run_dir, exist_ok=True)
 
-    step, loss_accum = 0, 0.0
-    pbar = tqdm(total=cfg.max_steps, unit="step", dynamic_ncols=True, disable=cfg.smoke)
+    step, loss_accum = start_step, 0.0
+    pbar = tqdm(total=cfg.max_steps, initial=start_step, unit="step",
+                dynamic_ncols=True, disable=cfg.smoke)
 
     while step < cfg.max_steps:
         for input_ids, loss_mask, _, _ in train_loader:
@@ -384,6 +411,8 @@ def train(cfg: Config):
 
             if step % cfg.save_every == 0 and not cfg.smoke:
                 torch.save({"step": step, "model": model.state_dict(),
+                            "optimizer": optimizer.state_dict(),
+                            "scheduler": scheduler.state_dict(),
                             "config": cfg.__dict__}, f"{run_dir}/ckpt_{step}.pt")
     pbar.close()
 
@@ -453,6 +482,9 @@ def parse_args() -> Config:
     # runtime
     p.add_argument("--no_wandb", action="store_true")
     p.add_argument("--smoke", action="store_true")
+    p.add_argument("--resume", type=str, default="",
+                   help="path to a ckpt_*.pt to continue from. Architecture flags must match "
+                        "the checkpoint. Raise --max_steps above the ckpt's step to train further.")
     p.add_argument("--compile", action="store_true",
                    help="torch.compile the training forward for speedup (GPU). "
                         "Eval stays eager. Windows+CUDA is finicky; drop if it errors.")
